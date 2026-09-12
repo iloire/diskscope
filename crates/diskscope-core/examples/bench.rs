@@ -2,12 +2,22 @@
 //!
 //! Reports the bulk walker against the POSIX walker on the same tree, which is
 //! the honest comparison — it isolates the syscall strategy from everything
-//! else (same parsing, same arena, same thread pool).
+//! else (same parsing, same arena, same thread pool). Off macOS there is only
+//! the one walker, so it is timed alone and no ratio is printed.
 
 use std::path::Path;
 use std::time::Instant;
 
 use diskscope_core::{fmt, kinds::KindTable, scan, ScanOptions};
+
+/// The walkers worth timing here. `getattrlistbulk` is a Darwin syscall, so
+/// everywhere else there is nothing to compare `posix` against — timing it
+/// twice would just print "1.00x faster".
+const WALKERS: &[(&str, bool)] = if cfg!(target_os = "macos") {
+    &[("getattrlistbulk", true), ("readdir + fstatat", false)]
+} else {
+    &[("readdir + fstatat", false)]
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -17,7 +27,7 @@ fn main() {
 
     println!("{path}  ({runs} runs each, best of)\n");
     let mut best = Vec::new();
-    for (label, prefer_bulk) in [("getattrlistbulk", true), ("readdir + fstatat", false)] {
+    for &(label, prefer_bulk) in WALKERS {
         let mut fastest = f64::INFINITY;
         let mut summary = String::new();
         for _ in 0..runs {

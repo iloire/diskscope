@@ -25,6 +25,9 @@
 //! unstarted children, not one per queued task. The parent reference is
 //! dropped the moment the child's own `openat` returns.
 
+/// `getattrlistbulk(2)` is a Darwin syscall, so the fast walker only exists on
+/// macOS. Everywhere else `posix` is the only walker and `prefer_bulk` is inert.
+#[cfg(target_os = "macos")]
 pub mod bulk;
 pub mod posix;
 
@@ -69,6 +72,7 @@ pub struct ScanOptions {
     /// Depth below the root at which to stop descending.
     pub max_depth: u8,
     /// Try `getattrlistbulk` before falling back to `readdir` + `fstatat`.
+    /// Ignored off macOS, where the syscall does not exist.
     pub prefer_bulk: bool,
     /// Add a synthetic "free space" node when the root is a volume.
     pub include_free_space: bool,
@@ -205,6 +209,7 @@ struct Task {
     depth: u8,
 }
 
+#[cfg(target_os = "macos")]
 thread_local! {
     static BULK_BUF: std::cell::RefCell<bulk::Buffer> =
         std::cell::RefCell::new(bulk::Buffer::new());
@@ -374,29 +379,59 @@ fn run<'s, 'k: 's>(s: &rayon::Scope<'s>, ctx: &'s Ctx<'k>, task: Task) {
 /// Reads one directory, preferring the bulk syscall and falling back per
 /// directory when the filesystem does not support it.
 fn enumerate(ctx: &Ctx<'_>, fd: libc::c_int, push: &mut impl FnMut(Ent<'_>)) -> io::Result<()> {
-    if ctx.opts.prefer_bulk {
-        let mut pushed = 0usize;
-        let outcome = BULK_BUF.with(|buf| {
-            bulk::read_dir(fd, &mut buf.borrow_mut(), |ent| {
-                pushed += 1;
-                push(ent);
-            })
-        });
-        match outcome {
-            Ok(()) => return Ok(()),
-            // Only retry from scratch if nothing was emitted yet. A failure
-            // part-way through cannot be undone, so it is reported as-is
-            // rather than replayed into duplicate entries.
-            Err(e) if pushed == 0 && bulk::is_unsupported(&e) => {
-                ctx.used_fallback.store(true, Ordering::Relaxed);
-                rewind(fd)?;
-            }
-            Err(e) => return Err(e),
-        }
+    if let Some(done) = try_bulk(ctx, fd, push) {
+        return done;
     }
     posix::read_dir(fd, push)
 }
 
+/// The `getattrlistbulk` attempt. `Some` when it read the whole directory or
+/// failed in a way that cannot be retried; `None` when the caller should fall
+/// back to `posix`.
+#[cfg(target_os = "macos")]
+fn try_bulk(
+    ctx: &Ctx<'_>,
+    fd: libc::c_int,
+    push: &mut impl FnMut(Ent<'_>),
+) -> Option<io::Result<()>> {
+    if !ctx.opts.prefer_bulk {
+        return None;
+    }
+    let mut pushed = 0usize;
+    let outcome = BULK_BUF.with(|buf| {
+        bulk::read_dir(fd, &mut buf.borrow_mut(), |ent| {
+            pushed += 1;
+            push(ent);
+        })
+    });
+    match outcome {
+        Ok(()) => Some(Ok(())),
+        // Only retry from scratch if nothing was emitted yet. A failure
+        // part-way through cannot be undone, so it is reported as-is
+        // rather than replayed into duplicate entries.
+        Err(e) if pushed == 0 && bulk::is_unsupported(&e) => {
+            ctx.used_fallback.store(true, Ordering::Relaxed);
+            match rewind(fd) {
+                Ok(()) => None,
+                Err(e) => Some(Err(e)),
+            }
+        }
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// There is no bulk syscall to try off macOS.
+#[cfg(not(target_os = "macos"))]
+fn try_bulk(
+    _ctx: &Ctx<'_>,
+    _fd: libc::c_int,
+    _push: &mut impl FnMut(Ent<'_>),
+) -> Option<io::Result<()>> {
+    None
+}
+
+/// Only the bulk retry needs this; `posix` opens its own `DIR*`.
+#[cfg(target_os = "macos")]
 fn rewind(fd: libc::c_int) -> io::Result<()> {
     // SAFETY: `fd` is a live directory descriptor.
     if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
@@ -612,8 +647,10 @@ fn volume_space(path: &Path) -> Option<(u64, u64)> {
     if unsafe { libc::statfs(cpath.as_ptr(), &mut st) } != 0 {
         return None;
     }
+    // Both fields are cast rather than used directly: `f_bsize` is `u32` on
+    // macOS and a signed `__fsword_t` on Linux, and the counts differ too.
     let block = st.f_bsize as u64;
-    Some((st.f_bavail * block, st.f_blocks * block))
+    Some((st.f_bavail as u64 * block, st.f_blocks as u64 * block))
 }
 
 /// True when `path` is itself a mount point, which is the only case where

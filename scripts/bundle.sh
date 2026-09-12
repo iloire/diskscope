@@ -8,6 +8,13 @@
 # keeps it.
 set -euo pipefail
 
+# A .app is a macOS construct and the Full Disk Access grant it exists for has
+# no counterpart elsewhere; on Linux the release binary is the deliverable.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "bundle.sh only applies to macOS; use target/release/diskscope directly" >&2
+  exit 1
+fi
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="${1:-$here/Diskscope.app}"
 version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/Cargo.toml" | head -1)"

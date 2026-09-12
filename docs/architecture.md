@@ -7,8 +7,9 @@ and driven from the command line. `diskscope` is the window.
 ```
 crates/diskscope-core/
   src/scan/mod.rs     parallel walk, chunk flatten, size rollup
-  src/scan/bulk.rs    getattrlistbulk(2) reader
-  src/scan/posix.rs   readdir + fstatat reader (fallback and reference)
+  src/scan/bulk.rs    getattrlistbulk(2) reader (macOS only)
+  src/scan/posix.rs   readdir + fstatat reader (fallback, reference, and the
+                      only walker off macOS)
   src/tree.rs         the flat arena
   src/kinds.rs        extension -> kind -> colour, loaded from JSON
   src/treemap.rs      squarified layout + cushion coefficients

@@ -4,14 +4,33 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Selects the item in a new Finder window.
-pub fn reveal_in_finder(path: &Path) -> io::Result<()> {
-    run("open", &["-R".as_ref(), path.as_os_str()])
+/// Shows the item in the desktop's file manager.
+///
+/// macOS `open -R` selects the item itself. Linux has no portable equivalent —
+/// the freedesktop way is a D-Bus call carrying a percent-encoded URI, which is
+/// more machinery than this earns — so there we open the containing folder and
+/// leave nothing selected.
+pub fn reveal_in_file_manager(path: &Path) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        run("open", &["-R".as_ref(), path.as_os_str()])
+    } else {
+        let folder = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        run("xdg-open", &[folder.as_os_str()])
+    }
 }
 
 /// Opens the item with whatever app owns it.
 pub fn open_path(path: &Path) -> io::Result<()> {
-    run("open", &[path.as_os_str()])
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    run(opener, &[path.as_os_str()])
 }
 
 /// Moves the item to the Trash, recoverably — never an unlink. The caller is
@@ -41,11 +60,20 @@ pub fn scan_targets() -> Vec<(String, PathBuf)> {
             .unwrap_or_else(|| "Home".into());
         out.push((label, home));
     }
-    out.push(("Macintosh HD".into(), PathBuf::from("/")));
+    let root_label = if cfg!(target_os = "macos") {
+        "Macintosh HD"
+    } else {
+        "Filesystem"
+    };
+    out.push((root_label.into(), PathBuf::from("/")));
 
-    // `/Volumes` holds external and network mounts, plus a symlink back to the
-    // boot volume that would just duplicate the entry above.
-    if let Ok(entries) = std::fs::read_dir("/Volumes") {
+    // Each root holds external and network mounts. Symlinks are skipped
+    // (`file_type` does not follow them), which on macOS drops the link
+    // `/Volumes` keeps back to the boot volume — already the entry above.
+    for dir in mount_roots() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut mounts: Vec<(String, PathBuf)> = entries
             .flatten()
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
@@ -55,6 +83,20 @@ pub fn scan_targets() -> Vec<(String, PathBuf)> {
         out.extend(mounts);
     }
     out
+}
+
+/// Directories the desktop mounts volumes into. macOS gathers them all under
+/// `/Volumes`; Linux spreads them across a few conventional roots, of which
+/// `/run/media/$USER` is what udisks2 uses.
+fn mount_roots() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return vec![PathBuf::from("/Volumes")];
+    }
+    let mut roots = vec![PathBuf::from("/media"), PathBuf::from("/mnt")];
+    if let Some(user) = std::env::var_os("USER") {
+        roots.push(Path::new("/run/media").join(user));
+    }
+    roots
 }
 
 /// Opens a folder picker. `None` when the user cancels.

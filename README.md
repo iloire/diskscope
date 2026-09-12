@@ -1,6 +1,6 @@
 # diskscope
 
-A cushion-treemap disk usage explorer for macOS, in the shape of
+A cushion-treemap disk usage explorer for macOS and Linux, in the shape of
 [Disk Inventory X](https://www.derlien.com/) but built to be fast enough that
 scanning is not an event you plan around.
 
@@ -59,17 +59,41 @@ to trust unsafe pointer work against a kernel ABI.
 
 ```sh
 git clone https://github.com/iloire/diskscope && cd diskscope
+cargo build --release      # target/release/diskscope
+```
+
+On macOS there is a second step worth taking:
+
+```sh
 scripts/bundle.sh          # builds Diskscope.app
 open Diskscope.app
 ```
-
-Or just `cargo build --release` and run `target/release/diskscope`.
 
 **To scan more than your home folder, grant Full Disk Access** in System
 Settings ▸ Privacy & Security ▸ Full Disk Access, and add `Diskscope.app`.
 Without it a scan of `/` silently skips most of `~/Library`, `/System/Data`
 and every other protected path — the status bar says how many items it could
-not read.
+not read. The bundle exists because the grant survives a rebuild and a grant
+on a bare binary does not.
+
+On Linux the binary is the whole story — there is no Full Disk Access to
+grant, so a scan reaches whatever the running user can read. Scanning `/`
+as an ordinary user will report errors for `/root`, other users' homes and
+parts of `/proc`; the count is in the status bar.
+
+### Platform differences
+
+The scanner, the treemap and the window are shared. Two things are not:
+
+- **Enumeration.** macOS uses `getattrlistbulk(2)`, which is what the speed
+  claim above rests on. Linux has no equivalent that returns sizes with the
+  batch, so it uses the `readdir` + `fstatat` walker — correct, and the same
+  parallel structure, but roughly the 1.4–1.5× slower path described below.
+  `--no-bulk` therefore does nothing on Linux; it is already the only walker.
+- **Size on disk.** macOS reads `ATTR_FILE_ALLOCSIZE`, which counts every
+  fork. Linux uses `st_blocks` × 512, which is the same number for ordinary
+  files and, unlike the macOS path, does not see resource forks — of which
+  Linux filesystems have none.
 
 ## Using it
 
@@ -83,9 +107,14 @@ you are pointing at.
 | **Breadcrumb** | jump back to any level |
 | ⌫ | up one level |
 | ⎋ | clear the selection and any highlighted kind |
-| ↩ | reveal the selection in the Finder |
+| ↩ | reveal the selection in the file manager |
 | ⌘⌫ | move the selection to the Trash (asks first) |
 | ⌘R / ⌘O | scan again / choose a folder |
+
+⌘ is Ctrl on Linux. ↩ opens a new Finder window with the item selected on
+macOS; on Linux it hands the containing folder to `xdg-open`, because
+selecting the item itself has no portable equivalent. The Trash is the
+desktop's own, never an `unlink`, on both.
 
 Click a row in **Kinds** to pick that kind out of the map — everything else
 greys back. **Folders** is the tree, sorted by size, and **Largest** is the
@@ -110,7 +139,8 @@ diskscope --text PATH         print a breakdown instead
   --apparent            size by apparent length rather than blocks on disk
   --all-volumes         descend into other volumes mounted inside the tree
   --keep-hard-links     count every name of a hard-linked file
-  --no-bulk             use the portable readdir walker
+  --no-bulk             use the portable readdir walker (macOS only; Linux
+                        has no other walker to switch away from)
   --depth N             stop N levels below the root
   --top N               how many largest files to list (default 15)
 ```
@@ -119,9 +149,11 @@ diskscope --text PATH         print a breakdown instead
 
 Getting these right is most of what a disk analyser is for:
 
-- **Size on disk** is `ATTR_FILE_ALLOCSIZE` — every fork, rounded to the
-  volume's block size. For an HFS-compressed file that is the compressed size,
-  while apparent size is the uncompressed length, so the two can differ a lot.
+- **Size on disk** is `ATTR_FILE_ALLOCSIZE` on macOS — every fork, rounded to
+  the volume's block size. For an HFS-compressed file that is the compressed
+  size, while apparent size is the uncompressed length, so the two can differ
+  a lot. On Linux it is `st_blocks` × 512, which gives the same answer for
+  ordinary files and likewise reports the compressed size on btrfs or ZFS.
 - **Hard links** are counted once, at the first name found. The other names
   still appear in the map, marked, with no size. Turn it off with
   `--keep-hard-links` to match what `du` without `-l` does not do.
@@ -130,14 +162,18 @@ Getting these right is most of what a disk analyser is for:
   unless you ask.
 - **Bundles** (`.app`, `.framework`, …) are scanned in full but drawn as one
   block, which is how you actually think about them. Toggle with `BUNDLES`.
+  The rule is by extension, so it fires on Linux too — mostly on a copied-over
+  `.app`, and harmlessly otherwise.
 - **Free space** appears as a block only when the scan starts at a volume root,
   because anywhere else it is not part of the tree and would distort every
   share.
 - **Directories** contribute only what is inside them. APFS reports no
-  allocation for a directory record itself.
-- **APFS clones** are not detected. Two cloned files share their blocks on
-  disk but report full size each, so a tree full of clones reads high. There is
-  no cheap way to tell; `du` has the same blind spot.
+  allocation for a directory record itself; ext4 and btrfs do report some, and
+  it is counted.
+- **Reflinks** are not detected — APFS clones, or `cp --reflink` on btrfs and
+  XFS. Two cloned files share their blocks on disk but report full size each,
+  so a tree full of clones reads high. There is no cheap way to tell; `du` has
+  the same blind spot.
 
 ## Configuring colours and kinds
 
@@ -151,7 +187,7 @@ reported in the status bar and the built-in table is used instead.
 ## Development
 
 ```sh
-cargo test --workspace       # 43 tests: scanner, layout, and the GUI headless
+cargo test --workspace       # 37 tests: scanner, layout, and the GUI headless
 cargo clippy --all-targets
 scripts/bench.sh ~/code      # against du, dust and find
 ```
@@ -163,7 +199,18 @@ a window:
 
 ```sh
 cargo run --release -p diskscope-core --example render_bmp -- ~/code map.bmp
-sips -s format png map.bmp --out map.png
+sips -s format png map.bmp --out map.png     # macOS
+magick map.bmp map.png                       # elsewhere
+```
+
+One of those 37 only runs on macOS: the test that pins the `getattrlistbulk`
+parser against the `readdir` walker has nothing to compare on Linux, where
+both settings select the same code. A cross-platform check that the macOS half
+still compiles needs no Mac:
+
+```sh
+rustup target add aarch64-apple-darwin
+cargo check --workspace --all-targets --target aarch64-apple-darwin
 ```
 
 The screenshot above is regenerated by `scripts/screenshot.sh <path>`. The app

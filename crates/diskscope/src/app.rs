@@ -18,6 +18,17 @@ use crate::{actions, job::ScanJob};
 /// How many files the Largest tab lists.
 const LARGEST_COUNT: usize = 40;
 
+/// How the platform writes its command modifier. egui's `Modifiers::command`
+/// is already Cmd on macOS and Ctrl elsewhere, so only the label changes.
+const CMD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+
+/// What the desktop calls the thing that shows a file in its folder.
+const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
+    "Finder"
+} else {
+    "file manager"
+};
+
 /// Smallest block, in points², that the map will subdivide down to. Below this
 /// a subtree is drawn as one aggregate block.
 const MIN_BLOCK_AREA: f32 = 9.0;
@@ -190,8 +201,8 @@ impl App {
             Action::Reveal(id) => {
                 if let Some(tree) = &self.tree {
                     let path = tree.path(id);
-                    if let Err(e) = actions::reveal_in_finder(&path) {
-                        self.note(format!("Can't show that in the Finder: {e}"));
+                    if let Err(e) = actions::reveal_in_file_manager(&path) {
+                        self.note(format!("Can't show that in the {FILE_MANAGER}: {e}"));
                     }
                 }
             }
@@ -457,7 +468,7 @@ impl App {
                 let can_rescan = self.last_root.is_some();
                 if ui
                     .add_enabled(can_rescan, egui::Button::new("Scan"))
-                    .on_hover_text("⌘R")
+                    .on_hover_text(format!("{CMD}R"))
                     .clicked()
                 {
                     queue.push(Action::Rescan);
@@ -792,7 +803,11 @@ impl App {
                     ui.add_space(4.0);
                 }
                 if let Some(id) = self.selected {
-                    if ui.button("Move to Trash").on_hover_text("⌘⌫").clicked() {
+                    if ui
+                        .button("Move to Trash")
+                        .on_hover_text(format!("{CMD}⌫"))
+                        .clicked()
+                    {
                         queue.push(Action::ConfirmTrash(id));
                     }
                     if ui.button("Copy path").clicked() {
@@ -801,7 +816,11 @@ impl App {
                     if ui.button("Open").clicked() {
                         queue.push(Action::Open(id));
                     }
-                    if ui.button("Reveal in Finder").on_hover_text("↩").clicked() {
+                    if ui
+                        .button(format!("Reveal in {FILE_MANAGER}"))
+                        .on_hover_text("↩")
+                        .clicked()
+                    {
                         queue.push(Action::Reveal(id));
                     }
                 }

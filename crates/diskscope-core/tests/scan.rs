@@ -5,6 +5,7 @@
 //! against a kernel ABI, so it is only trustworthy while it keeps producing
 //! byte-identical trees to the boring implementation.
 
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -76,6 +77,7 @@ fn opts(prefer_bulk: bool) -> ScanOptions {
 }
 
 /// Path relative to the root -> (flags, logical, physical), for comparison.
+#[cfg(target_os = "macos")]
 fn snapshot(tree: &Tree) -> BTreeMap<String, (u8, u64, u64)> {
     let mut out = BTreeMap::new();
     let mut stack = vec![ROOT];
@@ -114,6 +116,9 @@ fn allocated_by_stat(root: &Path) -> u64 {
     total
 }
 
+// Off macOS there is no bulk walker, so `prefer_bulk` selects the same `posix`
+// code on both sides and the comparison would pass without testing anything.
+#[cfg(target_os = "macos")]
 #[test]
 fn bulk_and_posix_walkers_agree_exactly() {
     let tmp = tempfile::tempdir().unwrap();

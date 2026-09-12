@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-12 13:11 — builds and runs on Linux
+
+Same scanner, treemap and window on both platforms; `cargo build --release`
+is now the whole install on Linux. Verified with the test suite and clippy on
+Linux, and `cargo check --target aarch64-apple-darwin` for the macOS half.
+
+- `getattrlistbulk(2)` is a Darwin syscall, so `scan::bulk` is now gated to
+  macOS and the walker choice moved into a `try_bulk` that is a no-op
+  elsewhere. `--no-bulk` is inert off macOS, where `posix` is the only walker.
+- The `posix` walker was not actually portable: it called `__error()` for
+  errno, which is macOS's spelling of glibc's `__errno_location()`, and read
+  the name length from `d_namlen`, which Linux's `dirent` does not have. The
+  name is now measured with `strlen` on both.
+- `statfs` field widths differ between the two libcs, so the free-space
+  arithmetic casts rather than assuming.
+- Desktop integration is per-platform: `xdg-open` instead of `open`, volumes
+  found under `/media`, `/mnt` and `/run/media/$USER` instead of `/Volumes`,
+  and Ctrl rather than ⌘ in the shortcut hints. "Reveal" selects the item on
+  macOS and opens its folder on Linux, which is as close as is portable.
+- `bundle.sh` refuses to run off macOS; `screenshot.sh` falls back to
+  ImageMagick where there is no `sips`, and builds its temp path in a way both
+  mktemp implementations accept.
+- The walker-equivalence test and the walker comparison in `examples/bench`
+  are macOS-only now — with one walker they compared `posix` against itself
+  and reported a meaningless 1.00×.
+
 ## 2026-09-12 00:00 — first working version
 
 Cushion-treemap disk usage explorer for macOS, in the shape of Disk Inventory X.
