@@ -43,6 +43,7 @@ OPTIONS
     --no-bulk               use the portable readdir walker, not getattrlistbulk
     --depth N               stop descending N levels below the root
     --top N                 how many largest files --text lists (default 15)
+    --screenshot FILE.bmp   scan, photograph the window into FILE, then quit
     -V, --version           print the version and the commit it was built from
     -h, --help              this
 ";
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
     let mut physical = true;
     let mut top = 15usize;
     let mut opts = ScanOptions::default();
+    let mut shot: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -78,6 +80,10 @@ fn main() -> ExitCode {
                 Some(n) => top = n,
                 None => return fail("--top needs a number"),
             },
+            "--screenshot" => match args.next() {
+                Some(file) => shot = Some(PathBuf::from(file)),
+                None => return fail("--screenshot needs a file to write"),
+            },
             other if other.starts_with('-') => {
                 return fail(&format!("unknown option {other}. Try --help."))
             }
@@ -95,13 +101,17 @@ fn main() -> ExitCode {
         };
     }
 
-    match run_window(path) {
+    if shot.is_some() && path.is_none() {
+        return fail("--screenshot needs a path to scan");
+    }
+
+    match run_window(path, shot) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string()),
     }
 }
 
-fn run_window(start: Option<PathBuf>) -> eframe::Result {
+fn run_window(start: Option<PathBuf>, shot: Option<PathBuf>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -112,7 +122,7 @@ fn run_window(start: Option<PathBuf>) -> eframe::Result {
     eframe::run_native(
         "Diskscope",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(&cc.egui_ctx, start)))),
+        Box::new(|cc| Ok(Box::new(app::App::new(&cc.egui_ctx, start, shot)))),
     )
 }
 

@@ -62,10 +62,33 @@ pub struct App {
     notice: Option<(String, Instant)>,
     pending_trash: Option<NodeId>,
     show_settings: bool,
+    screenshot: Option<Screenshot>,
 }
 
+/// Drives `--screenshot`: wait for the scan, let the map render, ask the
+/// window to capture itself, save the reply, quit.
+///
+/// The app photographs its own framebuffer rather than going through
+/// `screencapture`, which needs Screen Recording permission and cannot be
+/// scripted on a fresh machine.
+struct Screenshot {
+    path: PathBuf,
+    /// Frames to let pass after the scan lands, so the map texture is up.
+    warmup: u32,
+    requested: bool,
+    /// Frames waited in total, so a scan that never finishes still exits.
+    waited: u32,
+}
+
+/// Frames between "the tree is ready" and asking for the capture.
+const SHOT_WARMUP_FRAMES: u32 = 4;
+/// Roughly 30 s at the repaint rate below, then give up.
+const SHOT_MAX_FRAMES: u32 = 2000;
+
 impl App {
-    pub fn new(ctx: &egui::Context, start: Option<PathBuf>) -> Self {
+    /// Builds the window. With `shot` set it scans, photographs itself into
+    /// that file and quits — see [`Screenshot`].
+    pub fn new(ctx: &egui::Context, start: Option<PathBuf>, shot: Option<PathBuf>) -> Self {
         theme::install(ctx);
         let (kinds, kinds_warning) = KindTable::load_or_builtin();
         let mut app = Self {
@@ -90,6 +113,12 @@ impl App {
             notice: None,
             pending_trash: None,
             show_settings: false,
+            screenshot: shot.map(|path| Screenshot {
+                path,
+                warmup: SHOT_WARMUP_FRAMES,
+                requested: false,
+                waited: 0,
+            }),
         };
         if let Some(path) = start {
             app.start_scan(path);
@@ -247,6 +276,8 @@ impl App {
             self.apply(action, &ctx);
         }
 
+        self.drive_screenshot(&ctx);
+
         if self.is_scanning() {
             // Live counters are only worth animating while they move.
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
@@ -262,6 +293,63 @@ impl App {
 
     fn is_scanning(&self) -> bool {
         self.job.is_some()
+    }
+
+    fn drive_screenshot(&mut self, ctx: &egui::Context) {
+        // Taken out for the duration so the rest of `self` stays borrowable,
+        // and put back on every path that is still waiting.
+        let Some(mut shot) = self.screenshot.take() else {
+            return;
+        };
+
+        // The reply to a capture request arrives as an input event on a later
+        // frame, with the image already read back off the GPU.
+        let captured = ctx.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        });
+        if let Some(image) = captured {
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+            let [width, height] = image.size;
+            match diskscope_core::bmp::write_rgba(&shot.path, width as u32, height as u32, &rgba) {
+                Ok(()) => eprintln!("wrote {} ({width}x{height})", shot.path.display()),
+                Err(e) => eprintln!("diskscope: could not write {}: {e}", shot.path.display()),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        shot.waited += 1;
+        if shot.waited > SHOT_MAX_FRAMES {
+            eprintln!("diskscope: gave up waiting for something to photograph");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        // Keep frames coming; nothing else would ask for a repaint once the
+        // scan is done and the pointer is not moving.
+        ctx.request_repaint();
+
+        if !self.is_scanning() && self.tree.is_some() {
+            if shot.warmup > 0 {
+                shot.warmup -= 1;
+                if shot.warmup == 0 {
+                    // A picture of the readout band is worth more with
+                    // something in it, so point the app at its own biggest find.
+                    if let Some(tree) = &self.tree {
+                        self.selected =
+                            largest_files(tree, ROOT, 1, self.physical).first().copied();
+                    }
+                }
+            } else if !shot.requested {
+                shot.requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+        }
+
+        self.screenshot = Some(shot);
     }
 
     fn collect_finished_scan(&mut self) {
@@ -620,23 +708,26 @@ impl App {
         let mut queue = Vec::new();
 
         if let Some((message, _)) = self.notice.clone() {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("!")
-                        .font(theme::structure(13.0))
-                        .color(color::AMBER),
-                );
-                ui.label(
-                    egui::RichText::new(message)
-                        .font(theme::name(12.0))
-                        .color(color::PAPER),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new("!")
+                            .font(theme::structure(13.0))
+                            .color(color::AMBER),
+                    );
+                    ui.label(
+                        egui::RichText::new(message)
+                            .font(theme::name(12.0))
+                            .color(color::PAPER),
+                    );
+                },
+                |ui| {
                     if ui.small_button("Dismiss").clicked() {
                         self.notice = None;
                     }
-                });
-            });
+                },
+            );
             ui.add_space(4.0);
         }
 
@@ -652,43 +743,22 @@ impl App {
         };
 
         let focus = self.selected.or(self.hovered);
-        ui.horizontal(|ui| {
-            match focus {
+        // `Sides` with a shrinking left half is what keeps a deep path from
+        // running underneath the buttons: the path gives up width, the numbers
+        // and the actions never do.
+        egui::Sides::new().shrink_left().show(
+            ui,
+            |ui| match focus {
                 Some(id) => {
-                    let node = tree.node(id);
-                    let size = tree.size(id, self.physical);
-                    let view_total = tree.size(self.view_root, self.physical);
-                    swatch_dot(ui, self.kinds.kind(node.kind).color);
-                    ui.label(
-                        egui::RichText::new(tree.display_path(id))
-                            .font(theme::name(12.5))
-                            .color(color::PAPER),
+                    swatch_dot(ui, self.kinds.kind(tree.node(id).kind).color);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(tree.display_path(id))
+                                .font(theme::name(12.5))
+                                .color(color::PAPER),
+                        )
+                        .truncate(),
                     );
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "· {} · {} · {} of view",
-                            self.kinds.kind(node.kind).name,
-                            fmt::bytes(size),
-                            fmt::percent(size, view_total)
-                        ))
-                        .font(theme::data(11.5))
-                        .color(color::SOUNDING),
-                    );
-                    for (flag, label) in [
-                        (flags::SYMLINK, "symlink"),
-                        (flags::HARDLINK_DUP, "extra hard link, not counted"),
-                        (flags::PACKAGE, "bundle"),
-                        (flags::OTHER_FS, "another volume, not scanned"),
-                        (flags::UNREADABLE, "couldn't be read"),
-                    ] {
-                        if node.has(flag) {
-                            ui.label(
-                                egui::RichText::new(label)
-                                    .font(theme::name(11.0))
-                                    .color(color::AMBER),
-                            );
-                        }
-                    }
                 }
                 None => {
                     let stats = &tree.stats;
@@ -709,18 +779,17 @@ impl App {
                         .color(color::SOUNDING),
                     );
                 }
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Which build is this? Rendered only when the binary was
-                // stamped with a commit, so a tarball build shows nothing.
+            },
+            |ui| {
+                // Laid out right to left, so this reads bottom-up: the commit
+                // sits furthest right, then the actions, then the numbers.
                 if let Some(sha) = crate::COMMIT {
                     ui.label(
                         egui::RichText::new(sha)
                             .font(theme::data(10.5))
                             .color(color::SOUNDING.gamma_multiply(0.6)),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                 }
                 if let Some(id) = self.selected {
                     if ui.button("Move to Trash").on_hover_text("⌘⌫").clicked() {
@@ -736,8 +805,38 @@ impl App {
                         queue.push(Action::Reveal(id));
                     }
                 }
-            });
-        });
+                if let Some(id) = focus {
+                    let node = tree.node(id);
+                    for (flag, label) in [
+                        (flags::UNREADABLE, "couldn't be read"),
+                        (flags::OTHER_FS, "another volume, not scanned"),
+                        (flags::PACKAGE, "bundle"),
+                        (flags::HARDLINK_DUP, "extra hard link, not counted"),
+                        (flags::SYMLINK, "symlink"),
+                    ] {
+                        if node.has(flag) {
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .font(theme::name(11.0))
+                                    .color(color::AMBER),
+                            );
+                        }
+                    }
+                    let size = tree.size(id, self.physical);
+                    let view_total = tree.size(self.view_root, self.physical);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · {} · {} of view",
+                            self.kinds.kind(node.kind).name,
+                            fmt::bytes(size),
+                            fmt::percent(size, view_total)
+                        ))
+                        .font(theme::data(11.5))
+                        .color(color::SOUNDING),
+                    );
+                }
+            },
+        );
         queue
     }
 
@@ -908,7 +1007,7 @@ mod tests {
     impl Harness {
         fn new(root: &std::path::Path) -> Self {
             let ctx = egui::Context::default();
-            let app = App::new(&ctx, Some(root.to_path_buf()));
+            let app = App::new(&ctx, Some(root.to_path_buf()), None);
             Self {
                 ctx,
                 app,
@@ -1132,7 +1231,7 @@ mod tests {
     #[test]
     fn an_empty_window_and_a_failed_scan_both_render() {
         let ctx = egui::Context::default();
-        let mut app = App::new(&ctx, None);
+        let mut app = App::new(&ctx, None, None);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,

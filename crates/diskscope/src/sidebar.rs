@@ -122,6 +122,7 @@ impl Sidebar<'_> {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let mut active_rect = None;
         ui.horizontal(|ui| {
             for tab in [Tab::Kinds, Tab::Folders, Tab::Largest] {
                 let active = *self.tab == tab;
@@ -132,21 +133,27 @@ impl Sidebar<'_> {
                     } else {
                         color::SOUNDING
                     });
-                if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                let response = ui.add(egui::Button::new(text).frame(false));
+                if response.clicked() {
                     *self.tab = tab;
                 }
                 if active {
-                    // Underline the live tab rather than boxing it; the rail is
-                    // narrow and a box would eat the width.
-                    let r = ui.min_rect();
-                    ui.painter().hline(
-                        r.right() - 0.0..=r.right(),
-                        r.bottom(),
-                        Stroke::new(2.0, color::MAGENTA),
-                    );
+                    active_rect = Some(response.rect);
                 }
             }
         });
+        // Underline the live tab rather than boxing it; the rail is narrow and
+        // a box would eat the width. Painted out here rather than inside the
+        // row, because the row's clip rect ends at its own bottom edge and
+        // swallows anything drawn below it.
+        if let Some(rect) = active_rect {
+            ui.add_space(2.0);
+            ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() + 2.0,
+                Stroke::new(2.0, color::MAGENTA),
+            );
+        }
     }
 
     fn kinds_table(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {

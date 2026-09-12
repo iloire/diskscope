@@ -43,7 +43,11 @@ Cushion-treemap disk usage explorer for macOS, in the shape of Disk Inventory X.
 
 ### Tests
 
-41 tests: synthetic-record parsing for the kernel ABI, differential testing of
+43 tests: synthetic-record parsing for the kernel ABI, differential testing of
 the two walkers against each other and against `stat`, squarified layout
 invariants (exact tiling, no overlap, proportional areas), and six headless GUI
 tests that drive the real window through `egui::Context::run_ui`.
+
+Also: `--screenshot FILE` makes the window photograph itself, which is how
+`docs/screenshot.png` is generated (`scripts/screenshot.sh`) — `screencapture`
+needs Screen Recording permission and cannot be scripted.

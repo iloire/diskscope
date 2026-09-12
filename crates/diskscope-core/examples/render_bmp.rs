@@ -4,7 +4,6 @@
 //! Used to eyeball the map — shading, proportions, gutters — without a GUI in
 //! the way, and to diff renders after a change to the layout or rasteriser.
 
-use std::io::Write;
 use std::path::Path;
 
 use diskscope_core::kinds::KindTable;
@@ -57,41 +56,9 @@ fn main() {
         started.elapsed().as_secs_f64() * 1000.0
     );
 
-    write_bmp(Path::new(&out), img.width, img.height, &img.rgba).expect("write bmp");
+    diskscope_core::bmp::write_rgba(Path::new(&out), img.width, img.height, &img.rgba)
+        .expect("write bmp");
     eprintln!("wrote {out}");
-}
-
-/// 24-bit uncompressed BMP: bottom-up rows of BGR, each padded to 4 bytes.
-/// Verbose but dependency-free, and `sips` converts it to PNG.
-fn write_bmp(path: &Path, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {
-    let row_bytes = (width * 3).next_multiple_of(4) as usize;
-    let pixel_bytes = row_bytes * height as usize;
-    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
-
-    file.write_all(b"BM")?;
-    file.write_all(&(54 + pixel_bytes as u32).to_le_bytes())?;
-    file.write_all(&0u32.to_le_bytes())?;
-    file.write_all(&54u32.to_le_bytes())?;
-    file.write_all(&40u32.to_le_bytes())?;
-    file.write_all(&(width as i32).to_le_bytes())?;
-    file.write_all(&(height as i32).to_le_bytes())?;
-    file.write_all(&1u16.to_le_bytes())?;
-    file.write_all(&24u16.to_le_bytes())?;
-    for value in [0u32, pixel_bytes as u32, 0, 0, 0, 0] {
-        file.write_all(&value.to_le_bytes())?;
-    }
-
-    let mut row = vec![0u8; row_bytes];
-    for y in (0..height as usize).rev() {
-        for x in 0..width as usize {
-            let src = (y * width as usize + x) * 4;
-            row[x * 3] = rgba[src + 2];
-            row[x * 3 + 1] = rgba[src + 1];
-            row[x * 3 + 2] = rgba[src];
-        }
-        file.write_all(&row)?;
-    }
-    file.flush()
 }
 
 /// Lets the shading constants be swept from the shell while comparing renders.

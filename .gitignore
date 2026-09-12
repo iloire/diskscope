@@ -3,3 +3,4 @@
 Diskscope.app/
 .DS_Store
 .claude/settings.local.json
+*.bmp

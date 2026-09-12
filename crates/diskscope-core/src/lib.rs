@@ -17,6 +17,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+pub mod bmp;
 pub mod fmt;
 pub mod kinds;
 pub mod raster;
