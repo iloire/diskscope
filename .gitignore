@@ -1,0 +1,5 @@
+/target
+*.dsx
+Diskscope.app/
+.DS_Store
+.claude/settings.local.json
