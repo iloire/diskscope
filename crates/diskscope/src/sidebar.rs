@@ -326,12 +326,22 @@ impl Sidebar<'_> {
 fn row(ui: &mut egui::Ui, selected: bool, contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let height = 21.0;
     let full = egui::vec2(ui.available_width(), height);
-    let (rect, response) = ui.allocate_exact_size(full, Sense::click());
+    // Reserves the space only. The click sense is registered at the bottom,
+    // *after* the contents, because egui hit-tests topmost-first and a widget
+    // drawn later shadows what is under it — even a label, which senses
+    // nothing but hover. With the row's click rect going in first, every row
+    // was dead wherever its own text happened to land: the size and share
+    // labels on the right swallowed the click, and so did a kind name long
+    // enough to reach the pointer.
+    let (rect, reserved) = ui.allocate_exact_size(full, Sense::hover());
 
+    // Asked directly rather than taken from a response, since the widget that
+    // carries the hover is not registered until the contents are drawn.
+    let hovered = ui.rect_contains_pointer(rect);
     if selected {
         ui.painter()
             .rect_filled(rect, 2.0, color::MAGENTA.gamma_multiply(0.22));
-    } else if response.hovered() {
+    } else if hovered {
         ui.painter().rect_filled(rect, 2.0, color::PLATE);
     }
 
@@ -341,7 +351,13 @@ fn row(ui: &mut egui::Ui, selected: bool, contents: impl FnOnce(&mut egui::Ui)) 
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     contents(&mut child);
-    response
+    // A derived id, not `reserved.id`: re-registering the same id would merge
+    // with the entry already recorded above instead of landing on top.
+    let response = ui.interact(rect, reserved.id.with("row_hit"), Sense::click());
+    // Every row does something on click — pick out a kind, open a folder,
+    // select a file — and none of them look like a control, so the cursor is
+    // the only thing that says so.
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn swatch(ui: &mut egui::Ui, rgb: [u8; 3]) {

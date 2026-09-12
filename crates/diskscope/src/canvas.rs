@@ -70,6 +70,21 @@ pub struct CanvasInput<'a> {
     pub min_area: f32,
 }
 
+/// Where a double-click on `node` lands. A folder opens itself; anything else
+/// opens the folder holding it, since drilling into a file would leave an
+/// empty map. Returning the current root means there is nowhere to go.
+///
+/// Shared with [`crate::app`] so the cursor and the action cannot disagree
+/// about what is openable.
+pub fn drill_target(tree: &Tree, node: NodeId) -> NodeId {
+    let n = tree.node(node);
+    if n.is_dir() && n.child_len > 0 {
+        node
+    } else {
+        n.parent
+    }
+}
+
 /// What the pointer did over the map this frame.
 #[derive(Default)]
 pub struct CanvasOutput {
@@ -135,6 +150,16 @@ impl Canvas {
         }
         if response.secondary_clicked() {
             out.context_target = out.hovered;
+        }
+
+        // The map is one big widget, so without this the cursor looks the same
+        // over a block that opens into a folder and one that goes nowhere.
+        // Driven by the same rule the double-click uses, so the hand appears
+        // exactly where it would do something.
+        if let Some(node) = out.hovered {
+            if drill_target(input.tree, node) != input.root {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
         }
 
         self.draw_marks(ui, rect, input, out.hovered);

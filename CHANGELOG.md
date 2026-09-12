@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-09-12 13:49 — the pointer says what is clickable, and rows are one target
+
+- A hand cursor over a map block that opens into a folder. The map is a single
+  widget spanning the band, so nothing previously distinguished a block that
+  drills from one with nowhere to go. It is driven by the same rule as the
+  double-click — extracted as `canvas::drill_target` and now shared with the
+  action — so the cursor cannot promise a move that will not happen. Rows in
+  the sidebar get the hand too; none of them look like controls.
+- **Fixed: most of a sidebar row did not respond to clicks.** `row` registered
+  its click sense with `allocate_exact_size` and only then drew its contents.
+  egui hit-tests topmost-first, and a widget drawn later shadows what is under
+  it even when it senses nothing but hover — so each row was dead wherever its
+  own text fell. On a Kinds row the size and share numbers on the right
+  swallowed the click outright, and the kind name did too along the row's
+  centre line, leaving the colour swatch and the gaps between labels as the
+  only places that worked. The hit rect is now registered after the contents,
+  so the whole row is one target. Covered by a test that sweeps a row's full
+  width at its middle; the old code fails it.
+
 ## 2026-09-12 13:11 — builds and runs on Linux
 
 Same scanner, treemap and window on both platforms; `cargo build --release`

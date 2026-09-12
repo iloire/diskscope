@@ -10,7 +10,7 @@ use diskscope_core::tree::flags;
 use diskscope_core::{fmt, KindTable, NodeId, ScanOptions, Tree, ROOT};
 use egui::{Sense, Stroke, StrokeKind};
 
-use crate::canvas::{Canvas, CanvasInput};
+use crate::canvas::{self, Canvas, CanvasInput};
 use crate::sidebar::{self, Sidebar, Tab};
 use crate::theme::{self, color};
 use crate::{actions, job::ScanJob};
@@ -175,13 +175,7 @@ impl App {
             Action::Select(id) => self.selected = Some(id),
             Action::Drill(id) => {
                 let Some(tree) = &self.tree else { return };
-                // Drilling into a file would leave nothing to draw, so a file
-                // drills into its folder instead.
-                let target = if tree.node(id).is_dir() && tree.node(id).child_len > 0 {
-                    id
-                } else {
-                    tree.node(id).parent
-                };
+                let target = canvas::drill_target(tree, id);
                 if target != self.view_root {
                     self.view_root = target;
                     self.selected = None;
@@ -1021,6 +1015,8 @@ mod tests {
         ctx: egui::Context,
         app: App,
         pointer: egui::Pos2,
+        /// What the last frame asked the window to set the cursor to.
+        cursor: egui::CursorIcon,
     }
 
     impl Harness {
@@ -1031,6 +1027,7 @@ mod tests {
                 ctx,
                 app,
                 pointer: egui::pos2(700.0, 420.0),
+                cursor: egui::CursorIcon::Default,
             }
         }
 
@@ -1045,6 +1042,7 @@ mod tests {
             };
             let app = &mut self.app;
             let output = self.ctx.run_ui(input, |ui| app.show(ui));
+            self.cursor = output.platform_output.cursor_icon;
             discard(output);
         }
 
@@ -1247,6 +1245,54 @@ mod tests {
         h.frame(vec![]);
     }
 
+    /// The map is one widget covering the whole band, so the cursor is the
+    /// only cue that the block under the pointer opens into something. It is
+    /// driven by the same rule as the double-click, and this pins the two
+    /// together: a hand exactly where drilling would move, and not elsewhere.
+    #[test]
+    fn the_map_offers_a_hand_only_where_drilling_would_move() {
+        let tmp = fixture();
+        let mut h = Harness::new(tmp.path());
+        h.settle();
+
+        h.move_to(700.0, 420.0);
+        let hovered = h.app.hovered.expect("the pointer should be over a block");
+        let opens = {
+            let tree = h.app.tree.as_ref().unwrap();
+            canvas::drill_target(tree, hovered) != h.app.view_root
+        };
+        assert!(opens, "a block near the middle of the fixture should open");
+        assert_eq!(
+            h.cursor,
+            egui::CursorIcon::PointingHand,
+            "a block that opens into a folder should offer the hand"
+        );
+
+        // Now stand inside a leaf folder. Its files drill into their own
+        // parent, which is already the view, so there is nowhere to go and the
+        // cursor must not suggest there is.
+        let media = {
+            let tree = h.app.tree.as_ref().unwrap();
+            tree.children(ROOT)
+                .find(|&c| tree.name(c) == "media")
+                .unwrap()
+        };
+        h.app.apply(Action::Drill(media), &h.ctx.clone());
+        h.frame(vec![]);
+        h.move_to(700.0, 420.0);
+        let inside = h.app.hovered.expect("still over a block");
+        let stays = {
+            let tree = h.app.tree.as_ref().unwrap();
+            canvas::drill_target(tree, inside) == h.app.view_root
+        };
+        assert!(stays, "media's files should drill no further than media");
+        assert_eq!(
+            h.cursor,
+            egui::CursorIcon::Default,
+            "a block with nowhere to open must not offer the hand"
+        );
+    }
+
     #[test]
     fn an_empty_window_and_a_failed_scan_both_render() {
         let ctx = egui::Context::default();
@@ -1297,4 +1343,46 @@ mod tests {
         h.frame(vec![]);
         assert!(path.exists(), "cancelling must leave the file alone");
     }
+
+    /// Every sidebar row is meant to be one hit target. Regression: `row`
+    /// registered its click sense *before* drawing its contents, and egui
+    /// hit-tests topmost-first, so the labels painted over it shadowed the
+    /// click — the size and share text on the right was dead, and so was a
+    /// kind name long enough to sit under the pointer.
+    #[test]
+    fn a_kind_row_is_clickable_across_its_whole_width() {
+        let tmp = fixture();
+        let mut h = Harness::new(tmp.path());
+        h.settle();
+        h.app.tab = Tab::Kinds;
+        h.frame(vec![]);
+
+        // Locate a row by its left edge, next to the swatch — the one spot
+        // that stayed clickable throughout the bug — so the sweep below does
+        // not hardcode where the panel happens to put its rows.
+        let toggles = |h: &mut Harness, x: f32, y: f32| {
+            h.app.highlight = None;
+            h.frame(vec![]);
+            h.move_to(x, y);
+            h.click();
+            h.app.highlight.is_some()
+        };
+        let top = (240..360)
+            .map(|y| y as f32)
+            .find(|&y| toggles(&mut h, 18.0, y))
+            .expect("no kind row responded next to its swatch");
+        // Down into the middle of that row. The edge would not do: the labels
+        // are vertically centred and shorter than the row, so a sweep along
+        // the top passes over the bug rather than through it.
+        let row_y = top + 10.0;
+
+        // Same row, sampled out to the far edge where the numbers are drawn.
+        for x in [40.0, 90.0, 140.0, 190.0, 215.0, 240.0, 250.0] {
+            assert!(
+                toggles(&mut h, x, row_y),
+                "x={x} in the kind row at y={row_y} did not toggle the kind"
+            );
+        }
+    }
+
 }
